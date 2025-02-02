@@ -7,6 +7,7 @@ from pandas import read_csv
 from datetime import datetime
 from collections import Counter
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+import xgboost as xgb
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import accuracy_score, precision_score, recall_score, roc_curve, auc, confusion_matrix
 from TechnicalIndicators import *
@@ -360,7 +361,7 @@ def plotClassificationResult(y_test, y_pred):
 
 ###############################################################################
 
-def pipeline_crypto(crypto, crypto_dataframes, trading_day):
+def pipeline_crypto_rf(crypto, crypto_dataframes, trading_day):
     """
     Pipeline complet pour le traitement des données et la modélisation d'une crypto-monnaie.
 
@@ -473,18 +474,160 @@ def pipeline_crypto(crypto, crypto_dataframes, trading_day):
 
 ###############################################################################
 
+def pipeline_crypto_xgb(crypto, crypto_dataframes, trading_day):
+    """
+    Pipeline complet pour le traitement des données et la modélisation d'une crypto-monnaie.
+
+    Paramètres :
+    crypto : str
+        Nom de la crypto-monnaie.
+    crypto_dataframes : dict
+        Dictionnaire des DataFrames de crypto-monnaies.
+    trading_day : int
+        Nombre de jours de trading utilisés pour la préparation des données.
+
+    Retour :
+    None
+    """
+
+    print(f"Traitement des données pour {crypto}")
+
+    # Étape 1: Chargement des données
+    ohclv_data, close, date = getData(crypto, crypto_dataframes)
+    ohclv_data = np.array(ohclv_data)
+
+    # Étape 2: Préparation des données
+    X, y, xplot, closeplot, dateplot = prepareData(ohclv_data, close, date, trading_day)
+
+    # Vérification des classes uniques dans y
+    print(f"Classes uniques dans y avant traitement: {np.unique(y)}")
+
+    # # Correction des valeurs 0 dans y pour éviter des erreurs
+    # y[y == 0] = 1
+
+    # Correction des valeurs de y : convertir -1 en 0
+    y = np.where(y == -1, 0, y)
+
+    print(f"Données préparées pour {crypto}, X shape: {X.shape}, y shape: {y.shape}")
+
+    # Affichage des premières lignes des données préparées
+    print(f"\nAperçu des 10 premières lignes de X pour {crypto}:")
+    print(X[:10])
+    print(f"\nAperçu des 10 premières valeurs de y pour {crypto}:")
+    print(y[:10])
+
+    # Étape 3: Division des données en ensembles train/test
+    indices = np.arange(len(X))  # Création des indices pour suivre les échantillons
+    X_train, X_test, y_train, y_test, train_indices, test_indices = train_test_split(
+        X, y, indices, shuffle=False, random_state=42
+    )
+
+    # Affichage des tailles des ensembles
+    print(f"\nTaille des données après split pour {crypto}:")
+    print(f"- Taille de X_train : {X_train.shape}")
+    print(f"- Taille de X_test  : {X_test.shape}")
+    print(f"- Taille de y_train : {y_train.shape}")
+    print(f"- Taille de y_test  : {y_test.shape}")
+
+    ####################################################################
+
+    # Affichage des indices des ensembles d'entraînement et de test
+    print(f"\nIndices des données de 'train' pour {crypto}:")
+    print(train_indices)
+    print(f"\nIndices des données de 'test' pour {crypto}:")
+    print(test_indices)
+
+    # Comptage des classes dans les ensembles
+    train_counts = Counter(y_train)
+    test_counts = Counter(y_test)
+
+    print(f"\nDistribution des étiquettes dans y_train pour {crypto}:")
+    print(f"Nombre de +1: {train_counts[1]}, Nombre de -1: {train_counts[-1]}")
+    print(f"\nDistribution des étiquettes dans y_test pour {crypto}:")
+    print(f"Nombre de +1: {test_counts[1]}, Nombre de -1: {test_counts[-1]}")
+
+    ####################################################################
+
+    # Étape 4: Modélisation avec XGB
+    model = xgb.XGBClassifier(
+        n_estimators=100,
+        max_depth=3,
+        learning_rate=0.1,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        gamma=0,
+        reg_alpha=0,
+        reg_lambda=1,
+        eval_metric="logloss"
+    )
+
+    # Évaluation par validation croisée
+    scores = cross_val_score(model, X_train, y_train, cv=5)
+
+    print("\nCross Validation scores:")
+    for i, score in enumerate(scores):
+        print(f"Validation Set {i} score: {score:.4f}")
+
+    # Entraînement du modèle
+    model.fit(X_train, y_train)
+
+    # Prédiction sur l'ensemble de test
+    y_pred = model.predict(X_test)
+
+    ####################################################################
+
+    # Étape 5: Évaluation des performances
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred, pos_label=1)
+    recall = recall_score(y_test, y_pred, pos_label=1)
+    specificity = recall_score(y_test, y_pred, pos_label=0)
+
+    print("\nRésultats sur 'test':")
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall (Sensitivity): {recall:.4f}")
+    print(f"Specificity: {specificity:.4f}")
+
+    # Étape 6: Tracé de la courbe ROC + plotClassificationResult
+    y_prob = model.predict_proba(X_test)[:, 1]
+    fpr, tpr, _ = roc_curve(y_test, y_prob, pos_label=1)
+    # auc_score = auc(fpr, tpr)
+
+    if len(np.unique(y_test)) < 2:
+        print(f"Attention: y_test ne contient qu'une seule classe, impossible de calculer AUC.")
+        auc_score = np.nan
+    else:
+        if np.unique(y_prob).size == 1:
+            print("Attention: y_prob contient une seule valeur, courbe ROC invalide.")
+            auc_score = np.nan
+        else:
+            fpr, tpr, _ = roc_curve(y_test, y_prob, pos_label=1)
+            auc_score = auc(fpr, tpr)
+
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"AUC = {auc_score:.2f})")
+    plt.plot([0, 1], [0, 1], 'r--')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'ROC Curve for {crypto} and trading_day = {trading_day} (XGB)')
+    plt.legend()
+    plt.show()
+
+
+###############################################################################
+
 def main() :
 
     # Définition des données de crypto-monnaie
     cryptos = ["BTC"] # "BTC", "ETH", "XRP", "BNB", "SOL", "LINK"
-    Trading_Days = [90] # 3, 5, 10, 15, 30, 60, 90, 120
+    Trading_Days = [50] # [5, 10, 25, 50, 75, 100, 125, 150, 175, 200, 225, 250]
 
     # Appeler la méthode pour générer les DataFrames
     crypto_dataframes = generate_crypto_dataframes(cryptos)
 
     for crypto in cryptos: 
         for Trading_Day in Trading_Days:
-            pipeline_crypto(crypto, crypto_dataframes, Trading_Day)
+            pipeline_crypto_xgb(crypto, crypto_dataframes, Trading_Day)
 	
 ###############################################################################
 
